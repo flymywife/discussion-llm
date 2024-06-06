@@ -9,12 +9,12 @@ load_dotenv()
 co = cohere.Client(os.getenv('COHERE_API_KEY'))
 
 def chat_model1_to_model2(message, chat_history=[]):
-    response1 = co.chat(model="command-r", message=message, chat_history=chat_history,preamble="日本語で返答してください")
+    response1 = co.chat(model="command-r", message=message, chat_history=chat_history,preamble="Please discuss the global environment")
     response_text1 = response1.text
     chat_history.append({"role": "USER", "text": message})
     chat_history.append({"role": "CHATBOT", "text": response_text1})
     
-    response2 = co.chat(model="command-r-plus", message=response_text1, chat_history=chat_history)
+    response2 = co.chat(model="command-r-plus", message=response_text1, chat_history=chat_history,preamble="Please discuss the global environment")
     response_text2 = response2.text
     chat_history.append({"role": "USER", "text": response_text1})
     chat_history.append({"role": "CHATBOT", "text": response_text2})
