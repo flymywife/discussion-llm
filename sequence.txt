@@ -23,4 +23,3 @@ sequenceDiagram
     end
     
     Model1->>User: Discussion result
-    Model2->>User: Discussion result
