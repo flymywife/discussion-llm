@@ -1,0 +1,26 @@
+sequenceDiagram
+    participant User
+    participant Model1
+    participant Model2
+    participant DB
+    
+    User->>Model1: start
+    
+    loop Discussion
+        Model1->>Model1: Generate vector search query
+        Model1->>DB: Vector search query
+        DB->>Model1: Search results
+        
+        Model1->>Model1: Generate response
+        Model1->>Model2: Response message
+        
+        Model2->>Model2: Generate keyword search query
+        Model2->>DB: Keyword search query
+        DB->>Model2: Search results
+        
+        Model2->>Model2: Generate response
+        Model2->>Model1: Response message
+    end
+    
+    Model1->>User: Discussion result
+    Model2->>User: Discussion result
