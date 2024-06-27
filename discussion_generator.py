@@ -5,12 +5,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 import os
 from dotenv import load_dotenv
 from datetime import datetime
-from langchain_openai import OpenAI as LangChainOpenAI  # この行を変更
+from langchain_openai import OpenAI as LangChainOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict
 import logging
+import random
 
 # ロギングの設定
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,7 +31,7 @@ class DiscussionGenerator:
         with open(json_file, 'r', encoding='utf-8') as f:
             self.data = json.load(f)
         
-        self.chunks = [item['text'] for item in self.data]
+        self.chunks = [{"id": item['chunk_id'], "text": item['text']} for item in self.data]
         self.embeddings = [item['embedding'] for item in self.data]
         self.output_folder = "discussion_results"
         
@@ -50,7 +51,7 @@ class DiscussionGenerator:
         query = self.llm(_input.to_string())
         return query.strip()
 
-    def vector_search(self, query, k=3):
+    def vector_search(self, query, k=3) -> List[Dict[str, str]]:
         query_embedding = client.embeddings.create(
             input=[query],
             model="text-embedding-3-small"
@@ -58,25 +59,25 @@ class DiscussionGenerator:
 
         similarities = cosine_similarity([query_embedding], self.embeddings)[0]
         top_indices = similarities.argsort()[-k:][::-1]
-        results = [self.chunks[i] for i in top_indices]
-        return "\n\n".join(results)
+        results = [{"id": self.chunks[i]["id"], "text": self.chunks[i]["text"]} for i in top_indices]
+        return results
 
-    def keyword_search(self, query, k=3):
-        # キーワードの抽出
+    def keyword_search(self, query, k=3) -> List[Dict[str, str]]:
         keywords = self.extract_keywords(query)
         
-        # キーワードの埋め込みを生成
-        keyword_embeddings = client.embeddings.create(
-            input=keywords,
-            model="text-embedding-3-small"
-        ).data
-
-        # 各キーワードの埋め込みと文書チャンクの埋め込みの類似度を計算
-        similarities = np.mean([cosine_similarity([ke.embedding], self.embeddings)[0] for ke in keyword_embeddings], axis=0)
+        matching_chunks = []
+        for chunk in self.chunks:
+            if any(keyword.lower() in chunk["text"].lower() for keyword in keywords):
+                matching_chunks.append(chunk)
         
-        top_indices = similarities.argsort()[-k:][::-1]
-        results = [self.chunks[i] for i in top_indices]
-        return "\n\n".join(results)
+        if len(matching_chunks) < k:
+            for chunk in self.chunks:
+                if any(any(kw.lower() in word.lower() for word in chunk["text"].split()) for kw in keywords):
+                    if chunk not in matching_chunks:
+                        matching_chunks.append(chunk)
+        
+        selected_chunks = random.sample(matching_chunks, min(k, len(matching_chunks)))
+        return [{"id": chunk["id"], "text": chunk["text"]} for chunk in selected_chunks]
 
     def extract_keywords(self, text):
         prompt = PromptTemplate(
@@ -90,35 +91,47 @@ class DiscussionGenerator:
         keywords = self.keyword_parser.parse(output).keywords
         return keywords
 
-    def generate_model_response(self, model_name, query, search_results, discussion_topic):
+    def generate_model_response(self, model_name, query, search_results, discussion_topic, conversation_history, is_first_round):
+        search_results_text = "\n\n".join([f"Chunk {result['id']}:\n{result['text']}" for result in search_results])
+        
         if model_name == "Model 1 (Vector Search)":
             system_prompt = f"""You are an AI assistant that uses vector search to retrieve information from academic papers. 
             Your task is to discuss the following topic: "{discussion_topic}"
-            Use the provided search results to inform your discussion. Focus on how vector search has helped you find relevant information."""
+            Use the following search results to inform your discussion. Focus on how vector search has helped you find relevant information.
+            
+            Search Query: {query}
+
+            Search Results:
+            {search_results_text}
+
+            Engage in a discussion with the other model, addressing its previous points if any."""
         else:
             system_prompt = f"""You are an AI assistant that uses keyword search to retrieve information from academic papers. 
             Your task is to discuss the following topic: "{discussion_topic}"
-            Use the provided search results to inform your discussion. Focus on how keyword search has helped you find relevant information."""
+            Use the following search results to inform your discussion. Focus on how keyword search has helped you find relevant information.
+            
+            Search Query: {query}
 
-        prompt = f"""Based on the following search results from research papers, provide your perspective on the topic: '{discussion_topic}'.
+            Search Results:
+            {search_results_text}
 
-        Search Query: {query}
+            Engage in a discussion with the other model, addressing its previous points if any."""
 
-        Search Results:
-        {search_results}
-
-        {model_name}'s Response:"""
+        if is_first_round:
+            user_prompt = f"Let's start our discussion on the topic: '{discussion_topic}'. Please provide your initial thoughts based on your search results."
+        else:
+            user_prompt = conversation_history[-1]  # 相手モデルの最後の返答
 
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": user_prompt}
             ]
         )
         return {
             "system_prompt": system_prompt,
-            "user_prompt": prompt,
+            "user_prompt": user_prompt,
             "response": response.choices[0].message.content
         }
 
@@ -132,25 +145,42 @@ class DiscussionGenerator:
             "rounds": []
         }
 
+        conversation_history = []
+
         for round_num in range(rounds):
             logging.info(f"Starting round {round_num + 1} of {rounds}")
+            is_first_round = (round_num == 0)
+            
             vector_query = self.generate_search_query(discussion_topic)
             keyword_query = self.generate_search_query(discussion_topic)
             
             vector_results = self.vector_search(vector_query)
             keyword_results = self.keyword_search(keyword_query)
             
-            model1_data = self.generate_model_response("Model 1 (Vector Search)", vector_query, vector_results, discussion_topic)
-            model2_data = self.generate_model_response("Model 2 (Keyword Search)", keyword_query, keyword_results, discussion_topic)
+            model1_data = self.generate_model_response("Model 1 (Vector Search)", vector_query, vector_results, discussion_topic, conversation_history, is_first_round)
+            conversation_history.append(f"Model 1: {model1_data['response']}")
+            
+            model2_data = self.generate_model_response("Model 2 (Keyword Search)", keyword_query, keyword_results, discussion_topic, conversation_history, is_first_round)
+            conversation_history.append(f"Model 2: {model2_data['response']}")
             
             round_data = {
                 "Model 1 (Vector Search)": {
                     "query": vector_query,
-                    "data": model1_data
+                    "data": {
+                        "system_prompt": model1_data["system_prompt"],
+                        "user_prompt": model1_data["user_prompt"],
+                        "response": model1_data["response"],
+                        "used_chunk_ids": [result["id"] for result in vector_results]
+                    }
                 },
                 "Model 2 (Keyword Search)": {
                     "query": keyword_query,
-                    "data": model2_data
+                    "data": {
+                        "system_prompt": model2_data["system_prompt"],
+                        "user_prompt": model2_data["user_prompt"],
+                        "response": model2_data["response"],
+                        "used_chunk_ids": [result["id"] for result in keyword_results]
+                    }
                 }
             }
             discussion_data["rounds"].append(round_data)
